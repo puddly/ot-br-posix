@@ -82,6 +82,8 @@
 #define OT_REST_RESOURCE_PATH_NODE_COMMISSIONER_JOINER "/node/commissioner/joiner"
 #define OT_REST_RESOURCE_PATH_NODE_COPROCESSOR "/node/coprocessor"
 #define OT_REST_RESOURCE_PATH_NODE_COPROCESSOR_VERSION "/node/coprocessor/version"
+#define OT_REST_RESOURCE_PATH_NODE_BA_EPSKC_STATE "/node/ba-epskc/state"
+#define OT_REST_RESOURCE_PATH_NODE_BA_EPSKC_KEY "/node/ba-epskc/key"
 #define OT_REST_RESOURCE_PATH_NETWORK "/networks"
 #define OT_REST_RESOURCE_PATH_NETWORK_CURRENT "/networks/current"
 #define OT_REST_RESOURCE_PATH_NETWORK_CURRENT_COMMISSION "/networks/commission"
@@ -163,6 +165,16 @@ RestWebServer::RestWebServer(Host::RcpHost &aHost)
     mServer.Delete(OT_REST_RESOURCE_PATH_NODE_COMMISSIONER_JOINER, MakeHandler(&RestWebServer::CommissionerJoiner));
     mServer.Options(OT_REST_RESOURCE_PATH_NODE_COMMISSIONER_JOINER, MakeHandler(&RestWebServer::CommissionerJoiner));
     mServer.Get(OT_REST_RESOURCE_PATH_NODE_COPROCESSOR_VERSION, MakeHandler(&RestWebServer::CoprocessorVersion));
+
+#if OTBR_ENABLE_EPSKC
+    mServer.Get(OT_REST_RESOURCE_PATH_NODE_BA_EPSKC_STATE, MakeHandler(&RestWebServer::EpskcState));
+    mServer.Put(OT_REST_RESOURCE_PATH_NODE_BA_EPSKC_STATE, MakeHandler(&RestWebServer::EpskcState));
+    mServer.Options(OT_REST_RESOURCE_PATH_NODE_BA_EPSKC_STATE, MakeHandler(&RestWebServer::EpskcState));
+    mServer.Get(OT_REST_RESOURCE_PATH_NODE_BA_EPSKC_KEY, MakeHandler(&RestWebServer::EpskcKey));
+    mServer.Post(OT_REST_RESOURCE_PATH_NODE_BA_EPSKC_KEY, MakeHandler(&RestWebServer::EpskcKey));
+    mServer.Delete(OT_REST_RESOURCE_PATH_NODE_BA_EPSKC_KEY, MakeHandler(&RestWebServer::EpskcKey));
+    mServer.Options(OT_REST_RESOURCE_PATH_NODE_BA_EPSKC_KEY, MakeHandler(&RestWebServer::EpskcKey));
+#endif
 
     mServer.set_error_handler(MakeHandler(&RestWebServer::RoutingErrorHandler));
     mServer.Get(OT_REST_ROUTE_ACTIONS, MakeHandlerInMainLoop(&RestWebServer::ApiActionsHandler));
@@ -1052,6 +1064,184 @@ void RestWebServer::CoprocessorVersion(const Request &aRequest, Response &aRespo
         ErrorHandler(aResponse, StatusCode::MethodNotAllowed_405);
     }
 }
+
+#if OTBR_ENABLE_EPSKC
+void RestWebServer::GetEpskcState(Response &aResponse) const
+{
+    std::string state;
+
+    state = RunInMainLoop([this]() {
+        otBorderAgentEphemeralKeyState stateCode = otBorderAgentEphemeralKeyGetState(GetInstance());
+        if (stateCode == OT_BORDER_AGENT_STATE_DISABLED)
+        {
+            return Json::String2JsonString("disabled");
+        }
+        return Json::String2JsonString("enabled");
+    });
+
+    aResponse.set_content(state, OT_REST_CONTENT_TYPE_JSON);
+    aResponse.status = StatusCode::OK_200;
+}
+
+void RestWebServer::SetEpskcState(const Request &aRequest, Response &aResponse)
+{
+    otbrError   error = OTBR_ERROR_NONE;
+    std::string body;
+
+    VerifyOrExit(Json::JsonString2String(aRequest.body, body), error = OTBR_ERROR_INVALID_ARGS);
+    SuccessOrExit(error = RunInMainLoop([this, &body]() {
+                      if (body == "enable")
+                      {
+                          otBorderAgentEphemeralKeySetEnabled(GetInstance(), true);
+                      }
+                      else if (body == "disable")
+                      {
+                          otBorderAgentEphemeralKeySetEnabled(GetInstance(), false);
+                      }
+                      else
+                      {
+                          return OTBR_ERROR_INVALID_ARGS;
+                      }
+                      return OTBR_ERROR_NONE;
+                  }));
+
+    aResponse.status = StatusCode::OK_200;
+
+exit:
+    if (error == OTBR_ERROR_INVALID_ARGS)
+    {
+        ErrorHandler(aResponse, StatusCode::BadRequest_400);
+    }
+    else if (error != OTBR_ERROR_NONE)
+    {
+        ErrorHandler(aResponse, StatusCode::InternalServerError_500);
+    }
+}
+
+void RestWebServer::EpskcState(const Request &aRequest, Response &aResponse)
+{
+    switch (GetMethod(aRequest))
+    {
+    case HttpMethod::kGet:
+        GetEpskcState(aResponse);
+        break;
+    case HttpMethod::kPut:
+        SetEpskcState(aRequest, aResponse);
+        break;
+    case HttpMethod::kOptions:
+        aResponse.status = StatusCode::OK_200;
+        break;
+    default:
+        ErrorHandler(aResponse, StatusCode::MethodNotAllowed_405);
+        break;
+    }
+}
+
+void RestWebServer::GetEpskcKey(Response &aResponse) const
+{
+    std::string body;
+
+    body = RunInMainLoop([this]() {
+        otBorderAgentEphemeralKeyState state = otBorderAgentEphemeralKeyGetState(GetInstance());
+        uint16_t                       port  = otBorderAgentEphemeralKeyGetUdpPort(GetInstance());
+        return Json::EpskcKeyStatus2JsonString(state, port);
+    });
+
+    aResponse.set_content(body, OT_REST_CONTENT_TYPE_JSON);
+    aResponse.status = StatusCode::OK_200;
+}
+
+void RestWebServer::ActivateEpskcKey(const Request &aRequest, Response &aResponse)
+{
+    otbrError   error      = OTBR_ERROR_NONE;
+    otError     errorOt    = OT_ERROR_NONE;
+    uint32_t    lifetime   = OT_BORDER_AGENT_DEFAULT_EPHEMERAL_KEY_TIMEOUT;
+    uint16_t    port       = 0;
+    std::string tapString;
+    uint16_t    resultPort = 0;
+
+    if (!aRequest.body.empty())
+    {
+        VerifyOrExit(Json::JsonEpskcActivateParams(aRequest.body, lifetime, port), error = OTBR_ERROR_INVALID_ARGS);
+    }
+
+    SuccessOrExit(error = RunInMainLoop([this, &errorOt, &tapString, &resultPort, lifetime, port]() {
+                      otBorderAgentEphemeralKeyTap tap;
+
+                      errorOt = otBorderAgentEphemeralKeyGenerateTap(&tap);
+                      VerifyOrReturn(errorOt == OT_ERROR_NONE, OTBR_ERROR_OPENTHREAD);
+
+                      errorOt = otBorderAgentEphemeralKeyStart(GetInstance(), tap.mTap, lifetime, port);
+                      VerifyOrReturn(errorOt == OT_ERROR_NONE, OTBR_ERROR_OPENTHREAD);
+
+                      tapString  = tap.mTap;
+                      resultPort = otBorderAgentEphemeralKeyGetUdpPort(GetInstance());
+                      return OTBR_ERROR_NONE;
+                  }));
+
+    aResponse.set_content(Json::EpskcActivateResult2JsonString(tapString, resultPort), OT_REST_CONTENT_TYPE_JSON);
+    aResponse.status = StatusCode::OK_200;
+
+exit:
+    if (error == OTBR_ERROR_INVALID_ARGS)
+    {
+        ErrorHandler(aResponse, StatusCode::BadRequest_400);
+    }
+    else if (error == OTBR_ERROR_OPENTHREAD)
+    {
+        if (errorOt == OT_ERROR_INVALID_STATE)
+        {
+            ErrorHandler(aResponse, StatusCode::Conflict_409);
+        }
+        else if (errorOt == OT_ERROR_INVALID_ARGS)
+        {
+            ErrorHandler(aResponse, StatusCode::BadRequest_400);
+        }
+        else
+        {
+            ErrorHandler(aResponse, StatusCode::InternalServerError_500);
+        }
+    }
+    else if (error != OTBR_ERROR_NONE)
+    {
+        ErrorHandler(aResponse, StatusCode::InternalServerError_500);
+    }
+}
+
+void RestWebServer::DeactivateEpskcKey(const Request &aRequest, Response &aResponse)
+{
+    OT_UNUSED_VARIABLE(aRequest);
+
+    RunInMainLoop([this]() {
+        otBorderAgentEphemeralKeyStop(GetInstance());
+        return OTBR_ERROR_NONE;
+    });
+
+    aResponse.status = StatusCode::OK_200;
+}
+
+void RestWebServer::EpskcKey(const Request &aRequest, Response &aResponse)
+{
+    switch (GetMethod(aRequest))
+    {
+    case HttpMethod::kGet:
+        GetEpskcKey(aResponse);
+        break;
+    case HttpMethod::kPost:
+        ActivateEpskcKey(aRequest, aResponse);
+        break;
+    case HttpMethod::kDelete:
+        DeactivateEpskcKey(aRequest, aResponse);
+        break;
+    case HttpMethod::kOptions:
+        aResponse.status = StatusCode::OK_200;
+        break;
+    default:
+        ErrorHandler(aResponse, StatusCode::MethodNotAllowed_405);
+        break;
+    }
+}
+#endif // OTBR_ENABLE_EPSKC
 
 void RestWebServer::RoutingErrorHandler(const Request &aRequest, Response &aResponse)
 {

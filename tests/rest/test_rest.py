@@ -485,6 +485,32 @@ def error_test(thread_num):
     print(" /v1/hello : all {}, valid {} ".format(thread_num, valid))
 
 
+def epskc_test():
+    state_url = rest_api_addr + "/node/ba-epskc/state"
+    key_url = rest_api_addr + "/node/ba-epskc/key"
+
+    # Enable, activate, check, deactivate, disable
+    req = urllib.request.Request(state_url, data=b'"enable"', method='PUT')
+    req.add_header('Content-Type', 'application/json')
+    urllib.request.urlopen(req)
+
+    req = urllib.request.Request(key_url, data=b'{}', method='POST')
+    req.add_header('Content-Type', 'application/json')
+    data = json.loads(urllib.request.urlopen(req).read())
+    assert len(data["tap"]) == 9 and data["tap"].isdigit() and data["port"] > 0
+
+    data = json.loads(urllib.request.urlopen(key_url).read())
+    assert data["state"] == "started"
+
+    urllib.request.urlopen(urllib.request.Request(key_url, method='DELETE'))
+
+    req = urllib.request.Request(state_url, data=b'"disable"', method='PUT')
+    req.add_header('Content-Type', 'application/json')
+    urllib.request.urlopen(req)
+
+    print(" /node/ba-epskc : OK")
+
+
 def main():
     node_test(200)
     node_rloc_test(200)
@@ -499,6 +525,7 @@ def main():
     node_coprocessor_version_test(200)
     # diagnostics_test(20)  # partly replaced with restjsonapi tests
     error_test(10)
+    epskc_test()
 
     return 0
 

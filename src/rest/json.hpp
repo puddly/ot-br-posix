@@ -38,6 +38,7 @@
 
 #include <httplib.h>
 
+#include <openthread/border_agent.h>
 #include <openthread/dataset.h>
 #include <openthread/link.h>
 #include <openthread/thread_ftd.h>
@@ -445,6 +446,39 @@ otbrError StringDiscerner2Discerner(char *aString, otJoinerDiscerner &aDiscerner
 bool JsonJoinerInfoString2JoinerInfo(const std::string &aJsonJoinerInfo, otJoinerInfo &aJoinerInfo);
 
 std::string JoinerTable2JsonString(const std::vector<otJoinerInfo> &aJoinerTable);
+
+#if OTBR_ENABLE_EPSKC
+/**
+ * This method formats an EPSKC key status to a Json object and serialize it to a string.
+ *
+ * @param[in] aState  The ephemeral key state.
+ * @param[in] aPort   The UDP port being used.
+ *
+ * @returns A string of serialized Json object.
+ */
+std::string EpskcKeyStatus2JsonString(otBorderAgentEphemeralKeyState aState, uint16_t aPort);
+
+/**
+ * This method formats an EPSKC activation result to a Json object and serialize it to a string.
+ *
+ * @param[in] aTap   The generated Thread Administration Passcode (TAP).
+ * @param[in] aPort  The UDP port being used.
+ *
+ * @returns A string of serialized Json object.
+ */
+std::string EpskcActivateResult2JsonString(const std::string &aTap, uint16_t aPort);
+
+/**
+ * This method parses a Json string for EPSKC activation parameters.
+ *
+ * @param[in]  aJson      The Json string to be parsed.
+ * @param[out] aLifetime  The lifetime in milliseconds.
+ * @param[out] aPort      The UDP port.
+ *
+ * @returns If the Json string has been successfully parsed.
+ */
+bool JsonEpskcActivateParams(const std::string &aJson, uint32_t &aLifetime, uint16_t &aPort);
+#endif // OTBR_ENABLE_EPSKC
 
 /**
  * Converts a cJSON object to string.
